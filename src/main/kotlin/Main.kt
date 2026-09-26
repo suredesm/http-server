@@ -2,10 +2,12 @@ package lk.fincore
 
 import kotlinx.serialization.json.Json
 import java.io.IOException
+import java.io.InputStream
 import java.net.ServerSocket
 import java.net.Socket
 import java.nio.file.Files
 import java.nio.file.Path
+import kotlin.math.round
 
 private const val UPTO_ROUTE_API_LENGTH = 4
 
@@ -20,6 +22,9 @@ val rootPath = Path.of(
 fun main() {
     TCPServer(8080)
 }
+
+private const val CHUNKING_THRESHOLD = 1024 * 1024
+private const val CHUNK_SIZE = 1024 * 1024
 
 class TCPServer {
     constructor(port: Int) {
@@ -46,7 +51,7 @@ class TCPServer {
                 }
             }
 
-        }catch (e: IOException) {
+        } catch (e: IOException) {
             e.printStackTrace()
         }
     }
@@ -56,8 +61,9 @@ class TCPServer {
         var data: Int
         var requestText = ""
         var endOfStream = false
+        var fileInputStream: InputStream? = null
 
-        while(true) {
+        while (true) {
             data = inputStream.read()
             if (data == -1) {
                 endOfStream = true
@@ -71,18 +77,23 @@ class TCPServer {
         }
 
         var response: HttpResponse
+        var fileSize = 0L
 
         try {
             val httpRequest = HttpRequest.parse(requestText)
             val body = buildString {
                 @Suppress("UNUSED_PARAMETER")
-                for (i in 0..<httpRequest.contentLength) {
+                for (i in 0 ..< httpRequest.contentLength) {
                     data = inputStream.read()
                     if (data == -1) break
                     append(data.toChar())
                 }
             }
             httpRequest.body = body
+
+            if (httpRequest.headers["Connection"]?.contains("close") == true) {
+                endOfStream = true
+            }
 
             if (httpRequest.path.startsWith("/api")) {
                 if (httpRequest.method == "GET" && httpRequest.path.substring(UPTO_ROUTE_API_LENGTH) == "/users") {
@@ -152,7 +163,7 @@ class TCPServer {
                     }
                 } else if (
                     httpRequest.method == "PUT" &&
-                    httpRequest.path.substring(UPTO_ROUTE_API_LENGTH) =="/users"
+                    httpRequest.path.substring(UPTO_ROUTE_API_LENGTH) == "/users"
                 ) {
                     val content = httpRequest.body
                     val user = try {
@@ -218,23 +229,45 @@ class TCPServer {
                     pathRequested
                 }
 
-                if (fileToBeRetrieved != null) {
-                    val content = Files.readString(fileToBeRetrieved)
+                if (fileToBeRetrieved != null && Files.exists(fileToBeRetrieved)) {
+                    val size = Files.size(fileToBeRetrieved)
+                    fileSize = size
 
-                    response = HttpResponse(
-                        HTTP_VERSION_1_1,
-                        200,
+                    if (size < CHUNKING_THRESHOLD) {
+                        fileInputStream = Files.newInputStream(fileToBeRetrieved)
 
-                        "OK",
-                        mapOf(
-                            "Agent" to listOf("my-server!"),
-                            "Content-Type" to listOf(Files.probeContentType(fileToBeRetrieved))
-                        ),
+                        response = HttpResponse(
+                            HTTP_VERSION_1_1,
+                            200,
 
-                        content
-                    )
-                } else throw ServerException.NotFound("Index file not found")
-            }  else throw ServerException.NotFound("Not Found")
+                            "OK",
+                            mapOf(
+                                "Agent" to listOf("my-server!"),
+                                "Content-Type" to listOf(Files.probeContentType(fileToBeRetrieved)),
+                                "Content-Length" to listOf("" + size),
+                                "Connection" to listOf("close")
+                            ),
+                            "",
+                            autoAddContentLength = false
+                        )
+                    } else {
+                        response = HttpResponse(
+                            HTTP_VERSION_1_1,
+                            200,
+                            "OK",
+                            mapOf(
+                                "Agent" to listOf("my-server!"),
+                                "Content-Type" to listOf(Files.probeContentType(fileToBeRetrieved)),
+                                TRANSFER_ENCODING_HEADER to listOf(TRANSFER_ENCODING_VALUE_CHUNKED),
+                            ),
+
+                            ""
+                        )
+
+                        fileInputStream = Files.newInputStream(fileToBeRetrieved)
+                    }
+                } else throw ServerException.NotFound("File not found")
+            } else throw ServerException.NotFound("Not Found")
         } catch (e: Exception) {
             response = if (e is ServerException) e.response
             else HttpResponse(
@@ -249,12 +282,53 @@ class TCPServer {
             )
         }
 
-        val outputStream = socket.getOutputStream()
+        try {
+            val outputStream = socket.getOutputStream()
 
-        outputStream.write(response.toStringByteArray())
-        outputStream.flush()
+            if (fileInputStream != null) {
 
+                if (response.shouldTransferChunked()) {
 
-        return endOfStream && requestText == ""
+                    outputStream.write(response.toStringByteArray())
+                    outputStream.flush()
+                    val buffer = ByteArray(CHUNK_SIZE)
+
+                    var progressBytes = 0
+                    print("\r[" + "#".repeat(0) + ".".repeat(10) + "]")
+
+                    while (true) {
+                        val bytesRead = fileInputStream.read(buffer)
+                        progressBytes += bytesRead
+                        if (bytesRead == -1) break
+                        val chunkHeader = (bytesRead.toString(16) + "\r\n").toByteArray(Charsets.US_ASCII)
+                        val endOfChunk = "\r\n".toByteArray(Charsets.US_ASCII)
+                        outputStream.write(chunkHeader)
+                        outputStream.write(buffer.copyOfRange(0, bytesRead))
+                        outputStream.write(endOfChunk)
+                        outputStream.flush()
+
+                        val progress = round(progressBytes.toFloat() / fileSize * 10).toInt()
+                        print("\r[" + "#".repeat(progress) + ".".repeat(10 - progress) + "]")
+                    }
+                    println("\nCompleted!")
+                    val terminator = "0\r\n\r\n".toByteArray(Charsets.US_ASCII)
+                    outputStream.write(terminator)
+                    outputStream.flush()
+                    fileInputStream.close()
+                } else {
+                    val content = fileInputStream.readAllBytes()
+                    outputStream.write(response.toStringByteArray())
+                    outputStream.write(content)
+                    outputStream.flush()
+                }
+            } else {
+                outputStream.write(response.toStringByteArray())
+                outputStream.flush()
+            }
+        } catch(_: Exception) {
+            endOfStream = true
+        }
+
+        return endOfStream || requestText == ""
     }
 }

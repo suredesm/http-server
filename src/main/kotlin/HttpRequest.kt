@@ -4,8 +4,8 @@ import java.net.URLDecoder
 import java.nio.charset.StandardCharsets
 
 const val CONTENT_LENGTH_HEADER = "Content-Length"
-private const val TRANSFER_ENCODING_HEADER = "Transfer-Encoding"
-private const val TRANSFER_ENCODING_VALUE_CHUNKED = "chunked"
+const val TRANSFER_ENCODING_HEADER = "Transfer-Encoding"
+const val TRANSFER_ENCODING_VALUE_CHUNKED = "chunked"
 
 const val HTTP_VERSION_1_1 = "HTTP/1.1"
 
