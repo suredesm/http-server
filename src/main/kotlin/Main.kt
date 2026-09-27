@@ -1,6 +1,13 @@
 package lk.fincore
 
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.serialization.json.Json
+import java.awt.event.WindowEvent
+import java.awt.event.WindowListener
 import java.io.IOException
 import java.io.InputStream
 import java.net.ServerSocket
@@ -8,6 +15,7 @@ import java.net.Socket
 import java.nio.file.Files
 import java.nio.file.Path
 import kotlin.math.round
+import kotlin.time.Duration.Companion.seconds
 
 private const val UPTO_ROUTE_API_LENGTH = 4
 
@@ -32,22 +40,51 @@ class TCPServer {
             val serverSocket = ServerSocket(port)
             val repo = UserRepository()
             println("Server started")
-            println("Waiting for the client ...")
-            var socket: Socket = serverSocket.accept()
-            println("Client accepted!")
 
             while (true) {
-                if (socket.isClosed) {
-                    println("Waiting for the client ...")
-                    socket = serverSocket.accept()
-                    println("Client accepted!")
-                }
-                println("Listening for request ...")
-                val shouldClose = listenToClient(socket, repo)
-                println("Request completed")
-                if (shouldClose) {
-                    println("Connection closed")
-                    socket.close()
+                println("Waiting for the client ...")
+                val socket = serverSocket.accept()
+                println("Client accepted!")
+                val clientCoroutine = CoroutineScope(
+                    context = Dispatchers.IO
+                )
+
+                clientCoroutine.launch {
+                    val logger = ServerLogger.setupAndStartDefault("Client")
+                    val onSocketClose = {
+                        launch {
+                            logger.println("Connection closed")
+                            for (i in 5 downTo 1) {
+                                logger.print("\rLogger will closed in ${i}s")
+                                delay(1.seconds)
+                            }
+                            logger.dispose()
+                            socket.close()
+                        }
+                    }
+
+                    var requestProcessingJob: Job? = null
+
+                    logger.onWindowClosed {
+                        requestProcessingJob?.cancel()
+                        onSocketClose()
+                    }
+
+                    while(true) {
+                        var shouldClose = false
+                        requestProcessingJob = launch {
+                            logger.println("Listening for request ...")
+                            shouldClose = listenToClient(socket, repo, logger)
+                            logger.println("Request completed")
+                        }
+
+                        requestProcessingJob.join()
+                        if (socket.isClosed) break
+                        if (shouldClose) {
+                            onSocketClose()
+                            break
+                        }
+                    }
                 }
             }
 
@@ -56,7 +93,7 @@ class TCPServer {
         }
     }
 
-    private fun listenToClient(socket: Socket, repo: UserRepository): Boolean {
+    private fun listenToClient(socket: Socket, repo: UserRepository, logger: ServerLogger? = null): Boolean {
         val inputStream = socket.getInputStream()
         var data: Int
         var requestText = ""
@@ -294,7 +331,7 @@ class TCPServer {
                     val buffer = ByteArray(CHUNK_SIZE)
 
                     var progressBytes = 0
-                    print("\r[" + "#".repeat(0) + ".".repeat(10) + "]")
+                    logger?.print("\r[" + "#".repeat(0) + ".".repeat(10) + "]")
 
                     while (true) {
                         val bytesRead = fileInputStream.read(buffer)
@@ -308,9 +345,9 @@ class TCPServer {
                         outputStream.flush()
 
                         val progress = round(progressBytes.toFloat() / fileSize * 10).toInt()
-                        print("\r[" + "#".repeat(progress) + ".".repeat(10 - progress) + "]")
+                        logger?.print("\r[" + "#".repeat(progress) + ".".repeat(10 - progress) + "]")
                     }
-                    println("\nCompleted!")
+                    logger?.println("\nCompleted!")
                     val terminator = "0\r\n\r\n".toByteArray(Charsets.US_ASCII)
                     outputStream.write(terminator)
                     outputStream.flush()
