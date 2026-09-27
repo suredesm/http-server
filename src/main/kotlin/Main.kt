@@ -351,7 +351,6 @@ class TCPServer {
                     val terminator = "0\r\n\r\n".toByteArray(Charsets.US_ASCII)
                     outputStream.write(terminator)
                     outputStream.flush()
-                    fileInputStream.close()
                 } else {
                     val content = fileInputStream.readAllBytes()
                     outputStream.write(response.toStringByteArray())
@@ -364,6 +363,8 @@ class TCPServer {
             }
         } catch(_: Exception) {
             endOfStream = true
+        } finally {
+            fileInputStream?.close()
         }
 
         return endOfStream || requestText == ""
